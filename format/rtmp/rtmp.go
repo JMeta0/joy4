@@ -1493,7 +1493,6 @@ func (conn *Conn) readChunk() (err error) {
 	// critical timestamps: 4:39:00 (2^24 use of extended timestamp)
 	// critical timestamps: 596:31:00 (2^31 wraparound from ffmpeg)
 	var timestamp uint32
-	//var xtimestamp uint64
 
 	switch msghdrtype {
 	case 0:
@@ -1520,7 +1519,7 @@ func (conn *Conn) readChunk() (err error) {
 		}
 		n += len(h)
 		timestamp = pio.U24BE(h[0:3])
-		fmt.Printf("type 0      : timestamp         = %d", timestamp)
+		//fmt.Printf("type 0      : timestamp         = %d", timestamp)
 		cs.msghdrtype = msghdrtype
 		cs.msgdatalen = pio.U24BE(h[3:6])
 		cs.msgtypeid = h[6]
@@ -1531,14 +1530,14 @@ func (conn *Conn) readChunk() (err error) {
 			}
 			n += 4
 			timestamp = pio.U32BE(b)
-			fmt.Printf(", timeext = %d", timestamp)
+			//fmt.Printf(", timeext = %d", timestamp)
 			cs.hastimeext = true
 			cs.timeext = timestamp
 		} else {
 			cs.hastimeext = false
 		}
 		cs.timenow = timestamp
-		fmt.Printf(", timenow = %d", cs.timenow)
+		//fmt.Printf(", timenow = %d", cs.timenow)
 		cs.Start()
 
 	case 1:
@@ -1567,7 +1566,7 @@ func (conn *Conn) readChunk() (err error) {
 		}
 		n += len(h)
 		timestamp = pio.U24BE(h[0:3])
-		fmt.Printf("type 1      : timestamp (delta) = %d", timestamp)
+		//fmt.Printf("type 1      : timestamp (delta) = %d", timestamp)
 		cs.msghdrtype = msghdrtype
 		cs.msgdatalen = pio.U24BE(h[3:6])
 		cs.msgtypeid = h[6]
@@ -1577,7 +1576,7 @@ func (conn *Conn) readChunk() (err error) {
 			}
 			n += 4
 			timestamp = pio.U32BE(b)
-			fmt.Printf(", timeext = %d (delta)", timestamp)
+			//fmt.Printf(", timeext = %d (delta)", timestamp)
 			cs.hastimeext = true
 			cs.timeext = timestamp
 		} else {
@@ -1585,7 +1584,7 @@ func (conn *Conn) readChunk() (err error) {
 		}
 		cs.timedelta = timestamp
 		cs.timenow += timestamp
-		fmt.Printf(", timenow = %d", cs.timenow)
+		//fmt.Printf(", timenow = %d", cs.timenow)
 		cs.Start()
 
 	case 2:
@@ -1613,14 +1612,14 @@ func (conn *Conn) readChunk() (err error) {
 		n += len(h)
 		cs.msghdrtype = msghdrtype
 		timestamp = pio.U24BE(h[0:3])
-		fmt.Printf("type 2      : timestamp (delta) = %d", timestamp)
+		//fmt.Printf("type 2      : timestamp (delta) = %d", timestamp)
 		if timestamp == uint32(FlvTimestampMax) {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
 			n += 4
 			timestamp = pio.U32BE(b)
-			fmt.Printf(", timeext = %d (delta)", timestamp)
+			//fmt.Printf(", timeext = %d (delta)", timestamp)
 			cs.hastimeext = true
 			cs.timeext = timestamp
 		} else {
@@ -1628,7 +1627,7 @@ func (conn *Conn) readChunk() (err error) {
 		}
 		cs.timedelta = timestamp
 		cs.timenow += timestamp
-		fmt.Printf(", timenow = %d", cs.timenow)
+		//fmt.Printf(", timenow = %d", cs.timenow)
 		cs.Start()
 
 	case 3:
@@ -1646,7 +1645,7 @@ func (conn *Conn) readChunk() (err error) {
 					}
 					n += 4
 					timestamp = pio.U32BE(b)
-					fmt.Printf("type 3   (0): timestamp = %d", timestamp)
+					//fmt.Printf("type 3   (0): timestamp = %d", timestamp)
 					cs.timenow = timestamp
 					cs.timeext = timestamp
 				}
@@ -1660,10 +1659,10 @@ func (conn *Conn) readChunk() (err error) {
 				} else {
 					timestamp = cs.timedelta
 				}
-				fmt.Printf("type 3 (1,2): timestamp (delta) = %d", timestamp)
+				//fmt.Printf("type 3 (1,2): timestamp (delta) = %d", timestamp)
 				cs.timenow += timestamp
 			}
-			fmt.Printf(", timenow = %d", cs.timenow)
+			//fmt.Printf(", timenow = %d", cs.timenow)
 			cs.Start()
 		} else {
 			if cs.hastimeext {
@@ -1753,7 +1752,7 @@ func (conn *Conn) readChunk() (err error) {
 				if cs.prevtimenow > cs.timenow {
 					if cs.prevtimenow-cs.timenow > 0x3FFFFFFF {
 						// thats a wraparound (if bigger than 2^31 / 2)
-						fmt.Printf(", wraparound!")
+						//fmt.Printf(", wraparound!")
 						cs.xtimenow += int64(cs.timenow)
 					}
 				} else {
@@ -1769,8 +1768,8 @@ func (conn *Conn) readChunk() (err error) {
 			}
 		}
 
-		fmt.Printf(", timestamp = %d", timestamp)
-		fmt.Printf(", actual timestamp = %d\n", cs.xtimenow)
+		//fmt.Printf(", timestamp = %d", timestamp)
+		//fmt.Printf(", actual timestamp = %d\n", cs.xtimenow)
 
 		if err = conn.handleMsg(cs.xtimenow, cs.msgsid, cs.msgtypeid, cs.msgdata); err != nil {
 			return fmt.Errorf("handleMsg: %w", err)
@@ -1778,7 +1777,7 @@ func (conn *Conn) readChunk() (err error) {
 
 		cs.msgdata = nil
 	} else {
-		fmt.Printf("\n")
+		//fmt.Printf("\n")
 	}
 
 	conn.ackn += uint32(n)
