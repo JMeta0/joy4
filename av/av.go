@@ -119,6 +119,7 @@ var (
 	HEVC       = MakeVideoCodecType(avCodecTypeMagic + 2)
 	VP9        = MakeVideoCodecType(avCodecTypeMagic + 3)
 	AV1        = MakeVideoCodecType(avCodecTypeMagic + 4)
+	VVC        = MakeVideoCodecType(avCodecTypeMagic + 5)
 	AAC        = MakeAudioCodecType(avCodecTypeMagic + 1)
 	PCM_MULAW  = MakeAudioCodecType(avCodecTypeMagic + 2)
 	PCM_ALAW   = MakeAudioCodecType(avCodecTypeMagic + 3)
@@ -139,6 +140,8 @@ func (c CodecType) String() string {
 		return "VP9"
 	case AV1:
 		return "AV1"
+	case VVC:
+		return "VVC"
 	case AAC:
 		return "AAC"
 	case PCM_MULAW:

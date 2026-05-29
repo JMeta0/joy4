@@ -74,6 +74,7 @@ var (
 	FOURCC_AV1  = [4]byte{'a', 'v', '0', '1'}
 	FOURCC_VP9  = [4]byte{'v', 'p', '0', '9'}
 	FOURCC_HEVC = [4]byte{'h', 'v', 'c', '1'}
+	FOURCC_VVC  = [4]byte{'v', 'v', 'c', '1'}
 )
 
 func FourCCToFloat(fourcc [4]byte) float64 {
