@@ -1270,14 +1270,16 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 		data = tag.Data
 	}
 
+	flvTimestamp := uint32(ts & 0x7FFFFFFF)
+
 	actualChunkHeaderLength := chunkHeaderLength
-	if ts > FlvTimestampMax {
+	if flvTimestamp > maxFlvTimestamp {
 		actualChunkHeaderLength += 4
 	}
 
 	b := conn.tmpwbuf(actualChunkHeaderLength + flvio.MaxTagSubHeaderLength)
 	hdrlen := tag.FillHeader(b[actualChunkHeaderLength:])
-	conn.fillChunkHeader(false, b, csid, ts, msgtypeid, conn.avmsgsid, hdrlen+len(data))
+	conn.fillChunkHeader(false, b, csid, flvTimestamp, msgtypeid, conn.avmsgsid, hdrlen+len(data))
 	n := actualChunkHeaderLength + hdrlen
 
 	if _, err = conn.bufw.Write(b[:n]); err != nil {
@@ -1304,7 +1306,7 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 			break
 		}
 
-		n = conn.fillChunkHeader3(b, csid, ts)
+		n = conn.fillChunkHeader3(b, csid, flvTimestamp)
 
 		if _, err = conn.bufw.Write(b[:n]); err != nil {
 			return
@@ -1364,9 +1366,9 @@ func (conn *Conn) writePingResponse(timestamp uint32, append bool) (err error) {
 }
 
 const chunkHeaderLength = 12
-const FlvTimestampMax = int64(0xFFFFFF)
+const maxFlvTimestamp = uint32(0xFFFFFF)
 
-func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp int64, msgtypeid uint8, msgsid uint32, msgdatalen int) (n int) {
+func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp uint32, msgtypeid uint8, msgsid uint32, msgdatalen int) (n int) {
 	if !append {
 		//  0                   1                   2                   3
 		//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -1382,10 +1384,10 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 
 		b[n] = byte(csid) & 0x3f
 		n++
-		if timestamp <= FlvTimestampMax {
-			pio.PutU24BE(b[n:], uint32(timestamp))
+		if timestamp <= maxFlvTimestamp {
+			pio.PutU24BE(b[n:], timestamp)
 		} else {
-			pio.PutU24BE(b[n:], uint32(FlvTimestampMax))
+			pio.PutU24BE(b[n:], maxFlvTimestamp)
 		}
 		n += 3
 		pio.PutU24BE(b[n:], uint32(msgdatalen))
@@ -1394,8 +1396,8 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 		n++
 		pio.PutU32LE(b[n:], msgsid)
 		n += 4
-		if timestamp > FlvTimestampMax {
-			pio.PutU32BE(b[n:], uint32(timestamp&0x7FFFFFFF))
+		if timestamp > maxFlvTimestamp {
+			pio.PutU32BE(b[n:], timestamp)
 			n += 4
 		}
 	} else {
@@ -1428,11 +1430,11 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 	return
 }
 
-func (c *Conn) fillChunkHeader3(b []byte, csid uint32, timestamp int64) (n int) {
+func (c *Conn) fillChunkHeader3(b []byte, csid uint32, timestamp uint32) (n int) {
 	pio.PutU8(b, (uint8(csid)&0x3f)|3<<6)
 	n++
-	if timestamp >= FlvTimestampMax {
-		pio.PutU32BE(b[n:], uint32(timestamp&0x7FFFFFFF))
+	if timestamp >= maxFlvTimestamp {
+		pio.PutU32BE(b[n:], timestamp)
 		n += 4
 	}
 
@@ -1524,7 +1526,7 @@ func (conn *Conn) readChunk() (err error) {
 		cs.msgdatalen = pio.U24BE(h[3:6])
 		cs.msgtypeid = h[6]
 		cs.msgsid = pio.U32LE(h[7:11])
-		if timestamp == uint32(FlvTimestampMax) {
+		if timestamp == maxFlvTimestamp {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
@@ -1570,7 +1572,7 @@ func (conn *Conn) readChunk() (err error) {
 		cs.msghdrtype = msghdrtype
 		cs.msgdatalen = pio.U24BE(h[3:6])
 		cs.msgtypeid = h[6]
-		if timestamp == uint32(FlvTimestampMax) {
+		if timestamp == maxFlvTimestamp {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
@@ -1613,7 +1615,7 @@ func (conn *Conn) readChunk() (err error) {
 		cs.msghdrtype = msghdrtype
 		timestamp = pio.U24BE(h[0:3])
 		//fmt.Printf("type 2      : timestamp (delta) = %d", timestamp)
-		if timestamp == uint32(FlvTimestampMax) {
+		if timestamp == maxFlvTimestamp {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
