@@ -3,13 +3,14 @@ package ts
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"time"
+
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/format/ts/tsio"
 	"github.com/datarhei/joy4/utils/bits/pio"
-	"io"
-	"time"
 )
 
 type Demuxer struct {
@@ -183,7 +184,7 @@ func (self *Demuxer) readTSPacket() (err error) {
 	return
 }
 
-func (self *Stream) addPacket(payload []byte, timedelta time.Duration) {
+func (self *Stream) addPacket(payload []byte, timedelta int64) {
 	dts := self.dts
 	pts := self.pts
 	if dts == 0 {
@@ -218,7 +219,7 @@ func (self *Stream) payloadEnd() (n int, err error) {
 	case tsio.ElementaryStreamTypeAdtsAAC:
 		var config aacparser.MPEG4AudioConfig
 
-		delta := time.Duration(0)
+		delta := int64(0)
 		for len(payload) > 0 {
 			var hdrlen, framelen, samples int
 			if config, hdrlen, framelen, samples, err = aacparser.ParseADTSHeader(payload); err != nil {
@@ -231,7 +232,7 @@ func (self *Stream) payloadEnd() (n int, err error) {
 			}
 			self.addPacket(payload[hdrlen:framelen], delta)
 			n++
-			delta += time.Duration(samples) * time.Second / time.Duration(config.SampleRate)
+			delta += (time.Duration(samples) * time.Second / time.Duration(config.SampleRate)).Milliseconds()
 			payload = payload[framelen:]
 		}
 
@@ -251,7 +252,7 @@ func (self *Stream) payloadEnd() (n int, err error) {
 					b := make([]byte, 4+len(nalu))
 					pio.PutU32BE(b[0:4], uint32(len(nalu)))
 					copy(b[4:], nalu)
-					self.addPacket(b, time.Duration(0))
+					self.addPacket(b, 0)
 					n++
 				}
 			}

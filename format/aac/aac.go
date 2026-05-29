@@ -55,7 +55,7 @@ type Demuxer struct {
 	r         *bufio.Reader
 	config    aacparser.MPEG4AudioConfig
 	codecdata av.CodecData
-	ts        time.Duration
+	ts        int64
 }
 
 func NewDemuxer(r io.Reader) *Demuxer {
@@ -100,7 +100,7 @@ func (self *Demuxer) ReadPacket() (pkt av.Packet, err error) {
 	pkt.Data = pkt.Data[hdrlen:]
 
 	pkt.Time = self.ts
-	self.ts += time.Duration(samples) * time.Second / time.Duration(config.SampleRate)
+	self.ts += (time.Duration(samples) * time.Second / time.Duration(config.SampleRate)).Milliseconds()
 	return
 }
 

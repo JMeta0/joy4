@@ -130,7 +130,7 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 			filters = append(filters, &pktque.WaitKeyFrame{})
 		}
 
-		filters = append(filters, &pktque.FixTime{StartFromZero: true, MakeIncrement: false})
+		filters = append(filters, &pktque.FixTime{StartFromZero: false, MakeIncrement: false})
 
 		demuxer := &pktque.FilterDemuxer{
 			Filter:  filters,
@@ -178,7 +178,7 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 	if ch == nil {
 		ch = &channel{}
 		//ch.metadata = metadata
-		ch.que = pubsub.NewDurQueue()
+		ch.que = pubsub.NewDurationQueue()
 		ch.que.SetTargetTime(2 * time.Second)
 		//ch.que.SetMaxGopCount(100)
 		ch.que.WriteHeader(streams)

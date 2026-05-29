@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/codec/aacparser"
@@ -326,7 +325,7 @@ func (self *Demuxer) ReadPacket() (pkt av.Packet, err error) {
 	return
 }
 
-func (self *Demuxer) CurrentTime() (tm time.Duration) {
+func (self *Demuxer) CurrentTime() (tm int64) {
 	if len(self.streams) > 0 {
 		stream := self.streams[0]
 		tm = stream.tsToTime(stream.dts)
@@ -334,7 +333,7 @@ func (self *Demuxer) CurrentTime() (tm time.Duration) {
 	return
 }
 
-func (self *Demuxer) SeekToTime(tm time.Duration) (err error) {
+func (self *Demuxer) SeekToTime(tm int64) (err error) {
 	for _, stream := range self.streams {
 		if stream.Type().IsVideo() {
 			if err = stream.seekToTime(tm); err != nil {
@@ -394,7 +393,7 @@ func (self *Stream) readPacket() (pkt av.Packet, err error) {
 	return
 }
 
-func (self *Stream) seekToTime(tm time.Duration) (err error) {
+func (self *Stream) seekToTime(tm int64) (err error) {
 	index := self.timeToSampleIndex(tm)
 	if err = self.setSampleIndex(index); err != nil {
 		return
@@ -405,7 +404,7 @@ func (self *Stream) seekToTime(tm time.Duration) (err error) {
 	return
 }
 
-func (self *Stream) timeToSampleIndex(tm time.Duration) int {
+func (self *Stream) timeToSampleIndex(tm int64) int {
 	targetTs := self.timeToTs(tm)
 	targetIndex := 0
 

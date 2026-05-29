@@ -2,9 +2,10 @@ package tsio
 
 import (
 	"fmt"
-	"github.com/datarhei/joy4/utils/bits/pio"
 	"io"
 	"time"
+
+	"github.com/datarhei/joy4/utils/bits/pio"
 )
 
 const (
@@ -372,9 +373,9 @@ func FillPSI(h []byte, tableid uint8, tableext uint16, datalen int) (n int) {
 	return
 }
 
-func TimeToPCR(tm time.Duration) (pcr uint64) {
+func TimeToPCR(tm int64) (pcr uint64) {
 	// base(33)+resverd(6)+ext(9)
-	ts := uint64(tm * PCR_HZ / time.Second)
+	ts := uint64(tm * PCR_HZ / 1000)
 	base := ts / 300
 	ext := ts % 300
 	pcr = base<<15 | 0x3f<<9 | ext
@@ -389,26 +390,26 @@ func PCRToTime(pcr uint64) (tm time.Duration) {
 	return
 }
 
-func TimeToTs(tm time.Duration) (v uint64) {
-	ts := uint64(tm * PTS_HZ / time.Second)
+func TimeToTs(tm int64) (v uint64) {
+	ts := uint64(tm * PTS_HZ / 1000)
 	// 0010	PTS 32..30 1	PTS 29..15 1 PTS 14..00 1
 	v = ((ts>>30)&0x7)<<33 | ((ts>>15)&0x7fff)<<17 | (ts&0x7fff)<<1 | 0x100010001
 	return
 }
 
-func TsToTime(v uint64) (tm time.Duration) {
+func TsToTime(v uint64) (tm int64) {
 	// 0010	PTS 32..30 1	PTS 29..15 1 PTS 14..00 1
 	ts := (((v >> 33) & 0x7) << 30) | (((v >> 17) & 0x7fff) << 15) | ((v >> 1) & 0x7fff)
-	tm = time.Duration(ts) * time.Second / time.Duration(PTS_HZ)
+	tm = (time.Duration(ts) * time.Second / time.Duration(PTS_HZ)).Milliseconds()
 	return
 }
 
 const (
-	PTS_HZ = 90000
-	PCR_HZ = 27000000
+	PTS_HZ = int64(90000)
+	PCR_HZ = int64(27000000)
 )
 
-func ParsePESHeader(h []byte) (hdrlen int, streamid uint8, datalen int, pts, dts time.Duration, err error) {
+func ParsePESHeader(h []byte) (hdrlen int, streamid uint8, datalen int, pts, dts int64, err error) {
 	if h[0] != 0 || h[1] != 0 || h[2] != 1 {
 		err = ErrPESHeader
 		return
@@ -444,7 +445,7 @@ func ParsePESHeader(h []byte) (hdrlen int, streamid uint8, datalen int, pts, dts
 	return
 }
 
-func FillPESHeader(h []byte, streamid uint8, datalen int, pts, dts time.Duration) (n int) {
+func FillPESHeader(h []byte, streamid uint8, datalen int, pts, dts int64) (n int) {
 	h[0] = 0
 	h[1] = 0
 	h[2] = 1
@@ -514,7 +515,7 @@ func NewTSWriter(pid uint16) *TSWriter {
 	return w
 }
 
-func (self *TSWriter) WritePackets(w io.Writer, datav [][]byte, pcr time.Duration, sync bool, paddata bool) (err error) {
+func (self *TSWriter) WritePackets(w io.Writer, datav [][]byte, pcr int64, sync bool, paddata bool) (err error) {
 	datavlen := pio.VecLen(datav)
 	writev := make([][]byte, len(datav))
 	writepos := 0

@@ -3,13 +3,13 @@ package mp4
 import (
 	"bufio"
 	"fmt"
+	"io"
+
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/format/mp4/mp4io"
 	"github.com/datarhei/joy4/utils/bits/pio"
-	"io"
-	"time"
 )
 
 type Muxer struct {
@@ -178,7 +178,7 @@ func (self *Muxer) WritePacket(pkt av.Packet) (err error) {
 	return
 }
 
-func (self *Stream) writePacket(pkt av.Packet, rawdur time.Duration) (err error) {
+func (self *Stream) writePacket(pkt av.Packet, rawdur int64) (err error) {
 	if rawdur < 0 {
 		err = fmt.Errorf("mp4: stream#%d time=%v < lasttime=%v", pkt.Idx, pkt.Time, self.lastpkt.Time)
 		return
@@ -236,7 +236,7 @@ func (self *Muxer) WriteTrailer() (err error) {
 		NextTrackId:     2,
 	}
 
-	maxDur := time.Duration(0)
+	maxDur := int64(0)
 	timeScale := int64(10000)
 	for _, stream := range self.streams {
 		if err = stream.fillTrackAtom(); err != nil {

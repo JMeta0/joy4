@@ -97,12 +97,12 @@ func NewProber(maxProbePacketCount int) *Prober {
 	return prober
 }
 
-func (prober *Prober) CacheTag(_tag flvio.Tag, timestamp int32) {
+func (prober *Prober) CacheTag(_tag flvio.Tag, timestamp int64) {
 	pkt, _ := prober.TagToPacket(_tag, timestamp)
 	prober.CachedPkts = append(prober.CachedPkts, pkt)
 }
 
-func (prober *Prober) PushTag(tag flvio.Tag, timestamp int32) (err error) {
+func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 	prober.PushedCount++
 
 	if prober.MaxProbePacketCount <= 0 {
@@ -278,7 +278,7 @@ func (prober *Prober) Probed() (ok bool) {
 	return false
 }
 
-func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int32) (pkt av.Packet, ok bool) {
+func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet, ok bool) {
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
 		pkt.Idx = int8(prober.VideoStreamIdx)
@@ -439,7 +439,7 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 	return
 }
 
-func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp int32) {
+func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp int64) {
 	switch stream.Type() {
 	case av.H264:
 		tag = flvio.Tag{
@@ -678,7 +678,7 @@ func (demuxer *Demuxer) prepare() (err error) {
 		case 1:
 			for !demuxer.prober.Probed() {
 				var tag flvio.Tag
-				var timestamp int32
+				var timestamp int64
 				if tag, timestamp, err = flvio.ReadTag(demuxer.bufr, demuxer.b); err != nil {
 					return
 				}
@@ -712,7 +712,7 @@ func (demuxer *Demuxer) ReadPacket() (pkt av.Packet, err error) {
 
 	for {
 		var tag flvio.Tag
-		var timestamp int32
+		var timestamp int64
 		if tag, timestamp, err = flvio.ReadTag(demuxer.bufr, demuxer.b); err != nil {
 			return
 		}

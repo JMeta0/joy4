@@ -3,7 +3,6 @@ package ts
 import (
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/format/ts/tsio"
-	"time"
 )
 
 type Stream struct {
@@ -20,7 +19,7 @@ type Stream struct {
 	idx int
 
 	iskeyframe bool
-	pts, dts   time.Duration
+	pts, dts   int64
 	data       []byte
 	datalen    int
 }

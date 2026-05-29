@@ -2,12 +2,13 @@ package avconv
 
 import (
 	"fmt"
+	"io"
+	"time"
+
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/av/pktque"
 	"github.com/datarhei/joy4/av/transcode"
-	"io"
-	"time"
 )
 
 var Debug bool
@@ -125,7 +126,7 @@ func ConvertCmdline(args []string) (err error) {
 	flagv := false
 	flagt := false
 	flagre := false
-	duration := time.Duration(0)
+	duration := int64(0)
 	options := Options{}
 
 	for _, arg := range args {
@@ -152,7 +153,7 @@ func ConvertCmdline(args []string) (err error) {
 				flagt = false
 				var f float64
 				fmt.Sscanf(arg, "%f", &f)
-				duration = time.Duration(f * float64(time.Second))
+				duration = time.Duration(f * float64(time.Second)).Milliseconds()
 
 			default:
 				output = arg

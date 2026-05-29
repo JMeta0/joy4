@@ -25,7 +25,7 @@ type DurationQueue struct {
 	buf                          *pktque.Buf
 	lock                         *sync.RWMutex
 	cond                         *sync.Cond
-	mintime, maxtime, targettime time.Duration
+	mintime, maxtime, targettime int64
 	streams                      []av.CodecData
 	closed                       bool
 }
@@ -33,7 +33,7 @@ type DurationQueue struct {
 func NewDurationQueue() *DurationQueue {
 	q := &DurationQueue{}
 	q.buf = pktque.NewBuf()
-	q.targettime = 2 * time.Second
+	q.targettime = 2000 // 2000ms = 2 seconds
 	q.lock = &sync.RWMutex{}
 	q.cond = sync.NewCond(q.lock.RLocker())
 	return q
@@ -41,7 +41,7 @@ func NewDurationQueue() *DurationQueue {
 
 func (q *DurationQueue) SetTargetTime(t time.Duration) {
 	q.lock.Lock()
-	q.targettime = t
+	q.targettime = t.Milliseconds()
 	q.lock.Unlock()
 }
 

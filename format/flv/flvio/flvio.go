@@ -3,18 +3,17 @@ package flvio
 import (
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/utils/bits/pio"
 )
 
-func TsToTime(ts int32) time.Duration {
-	return time.Millisecond * time.Duration(ts)
+func TsToTime(ts int64) int64 {
+	return ts
 }
 
-func TimeToTs(tm time.Duration) int32 {
-	return int32(tm / time.Millisecond)
+func TimeToTs(tm int64) int64 {
+	return tm
 }
 
 const MaxTagSubHeaderLength = 16
@@ -193,7 +192,7 @@ type Tag struct {
 	*/
 	AVCPacketType uint8
 
-	CompositionTime int32
+	CompositionTime int64
 
 	FourCC [4]byte
 
@@ -291,7 +290,7 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 			}
 			n++
 
-			t.CompositionTime = pio.I24BE(b[n:])
+			t.CompositionTime = int64(pio.I24BE(b[n:]))
 			n += 3
 		}
 	} else {
@@ -311,7 +310,7 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 
 		if t.FourCC == FOURCC_HEVC {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
-				t.CompositionTime = pio.I24BE(b[n:])
+				t.CompositionTime = int64(pio.I24BE(b[n:]))
 				n += 3
 			}
 		}
@@ -335,7 +334,7 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 
 		if t.FourCC == FOURCC_HEVC {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
-				pio.PutI24BE(b[n:], t.CompositionTime)
+				pio.PutI24BE(b[n:], int32(t.CompositionTime&0x7FFFFF))
 				n += 3
 			}
 		}
@@ -345,7 +344,7 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 		n++
 		b[n] = t.AVCPacketType
 		n++
-		pio.PutI24BE(b[n:], t.CompositionTime)
+		pio.PutI24BE(b[n:], int32(t.CompositionTime&0x7FFFFF))
 		n += 3
 	}
 
@@ -390,7 +389,7 @@ const (
 const TagHeaderLength = 11
 const TagTrailerLength = 4
 
-func ParseTagHeader(b []byte) (tag Tag, ts int32, datalen int, err error) {
+func ParseTagHeader(b []byte) (tag Tag, ts int64, datalen int, err error) {
 	tagtype := b[0]
 
 	switch tagtype {
@@ -408,12 +407,12 @@ func ParseTagHeader(b []byte) (tag Tag, ts int32, datalen int, err error) {
 	var tshi uint8
 	tslo = pio.U24BE(b[4:7])
 	tshi = b[7]
-	ts = int32(tslo | uint32(tshi)<<24)
+	ts = int64(tslo | uint32(tshi)<<24)
 
 	return
 }
 
-func ReadTag(r io.Reader, b []byte) (tag Tag, ts int32, err error) {
+func ReadTag(r io.Reader, b []byte) (tag Tag, ts int64, err error) {
 	if _, err = io.ReadFull(r, b[:TagHeaderLength]); err != nil {
 		return
 	}
@@ -439,7 +438,7 @@ func ReadTag(r io.Reader, b []byte) (tag Tag, ts int32, err error) {
 	return
 }
 
-func FillTagHeader(b []byte, tagtype uint8, datalen int, ts int32) (n int) {
+func FillTagHeader(b []byte, tagtype uint8, datalen int, ts int64) (n int) {
 	b[n] = tagtype
 	n++
 	pio.PutU24BE(b[n:], uint32(datalen))
@@ -459,7 +458,7 @@ func FillTagTrailer(b []byte, datalen int) (n int) {
 	return
 }
 
-func WriteTag(w io.Writer, tag Tag, ts int32, b []byte) (err error) {
+func WriteTag(w io.Writer, tag Tag, ts int64, b []byte) (err error) {
 	data := tag.Data
 
 	n := tag.FillHeader(b[TagHeaderLength:])

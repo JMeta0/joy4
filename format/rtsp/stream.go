@@ -3,7 +3,6 @@ package rtsp
 import (
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/format/rtsp/sdp"
-	"time"
 )
 
 type Stream struct {
@@ -24,5 +23,5 @@ type Stream struct {
 	timestamp      uint32
 	firsttimestamp uint32
 
-	lasttime time.Duration
+	lasttime int64
 }

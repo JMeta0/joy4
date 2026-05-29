@@ -1,9 +1,5 @@
 package pktque
 
-import (
-	"time"
-)
-
 /*
 pop                                   push
 
@@ -15,15 +11,15 @@ headtm                               tailtm
 */
 
 type tlSeg struct {
-	tm, dur time.Duration
+	tm, dur int64
 }
 
 type Timeline struct {
 	segs   []tlSeg
-	headtm time.Duration
+	headtm int64
 }
 
-func (self *Timeline) Push(tm time.Duration, dur time.Duration) {
+func (self *Timeline) Push(tm int64, dur int64) {
 	if len(self.segs) > 0 {
 		tail := self.segs[len(self.segs)-1]
 		diff := tm - (tail.tm + tail.dur)
@@ -34,7 +30,7 @@ func (self *Timeline) Push(tm time.Duration, dur time.Duration) {
 	self.segs = append(self.segs, tlSeg{tm, dur})
 }
 
-func (self *Timeline) Pop(dur time.Duration) (tm time.Duration) {
+func (self *Timeline) Pop(dur int64) (tm int64) {
 	if len(self.segs) == 0 {
 		return self.headtm
 	}

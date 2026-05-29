@@ -2,6 +2,7 @@
 package pktque
 
 import (
+	"math"
 	"time"
 
 	"github.com/datarhei/joy4/av"
@@ -81,9 +82,9 @@ func (self *WaitKeyFrame) ModifyPacket(pkt *av.Packet, streams []av.CodecData, v
 
 // Fix incorrect packet timestamps.
 type FixTime struct {
-	zerobase      time.Duration
-	incrbase      time.Duration
-	lasttime      time.Duration
+	zerobase      int64
+	incrbase      int64
+	lasttime      int64
 	StartFromZero bool // make timestamp start from zero
 	MakeIncrement bool // force timestamp increment
 }
@@ -101,7 +102,7 @@ func (self *FixTime) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoi
 		if self.lasttime == 0 {
 			self.lasttime = pkt.Time
 		}
-		if pkt.Time < self.lasttime || pkt.Time > self.lasttime+time.Millisecond*500 {
+		if pkt.Time < self.lasttime || pkt.Time > self.lasttime+500 {
 			self.incrbase += pkt.Time - self.lasttime
 			pkt.Time = self.lasttime
 		}
@@ -113,15 +114,15 @@ func (self *FixTime) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoi
 
 // Drop incorrect packets to make A/V sync.
 type AVSync struct {
-	MaxTimeDiff time.Duration
-	time        []time.Duration
+	MaxTimeDiff int64
+	time        []int64
 }
 
 func (self *AVSync) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoidx int, audioidx int) (drop bool, err error) {
 	if self.time == nil {
-		self.time = make([]time.Duration, len(streams))
+		self.time = make([]int64, len(streams))
 		if self.MaxTimeDiff == 0 {
-			self.MaxTimeDiff = time.Millisecond * 500
+			self.MaxTimeDiff = 500
 		}
 	}
 
@@ -141,7 +142,7 @@ func (self *AVSync) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoid
 	return
 }
 
-func (self *AVSync) check(i int) (start time.Duration, end time.Duration, correctable bool, correcttime time.Duration) {
+func (self *AVSync) check(i int) (start int64, end int64, correctable bool, correcttime int64) {
 	minidx := -1
 	maxidx := -1
 	for j := range self.time {
@@ -166,24 +167,25 @@ func (self *AVSync) check(i int) (start time.Duration, end time.Duration, correc
 
 	start = self.time[minidx]
 	end = start + self.MaxTimeDiff
-	correcttime = start + time.Millisecond*40
+	correcttime = start + 40
 	return
 }
 
 // Make packets reading speed as same as walltime, effect like ffmpeg -re option.
 type Walltime struct {
-	firsttime time.Time
+	firsttime int64
 }
 
 func (self *Walltime) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoidx int, audioidx int) (drop bool, err error) {
 	if pkt.Idx == 0 {
-		if self.firsttime.IsZero() {
-			self.firsttime = time.Now()
+		now := time.Now().Unix() * 1000
+		if self.firsttime == math.MinInt64 {
+			self.firsttime = now
 		}
-		pkttime := self.firsttime.Add(pkt.Time)
-		delta := pkttime.Sub(time.Now())
+		pkttime := self.firsttime + pkt.Time
+		delta := pkttime - now
 		if delta > 0 {
-			time.Sleep(delta)
+			time.Sleep(time.Duration(delta) * time.Millisecond)
 		}
 	}
 	return

@@ -8,13 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"github.com/datarhei/joy4/av"
-	"github.com/datarhei/joy4/av/avutil"
-	"github.com/datarhei/joy4/codec"
-	"github.com/datarhei/joy4/codec/aacparser"
-	"github.com/datarhei/joy4/codec/h264parser"
-	"github.com/datarhei/joy4/format/rtsp/sdp"
-	"github.com/datarhei/joy4/utils/bits/pio"
 	"io"
 	"net"
 	"net/textproto"
@@ -22,6 +15,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/codec"
+	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/codec/h264parser"
+	"github.com/datarhei/joy4/format/rtsp/sdp"
+	"github.com/datarhei/joy4/utils/bits/pio"
 )
 
 var ErrCodecDataChange = fmt.Errorf("rtsp: codec data change, please call HandleCodecDataChange()")
@@ -1171,10 +1172,10 @@ func (self *Client) handleBlock(block []byte) (pkt av.Packet, ok bool, err error
 
 		ok = true
 		pkt = stream.pkt
-		pkt.Time = time.Duration(stream.timestamp) * time.Second / time.Duration(stream.timeScale())
+		pkt.Time = (time.Duration(stream.timestamp) * time.Second / time.Duration(stream.timeScale())).Milliseconds()
 		pkt.Idx = int8(self.setupMap[i])
 
-		if pkt.Time < stream.lasttime || pkt.Time-stream.lasttime > time.Minute*30 {
+		if pkt.Time < stream.lasttime || pkt.Time-stream.lasttime > (time.Minute*30).Milliseconds() {
 			err = fmt.Errorf("rtp: time invalid stream#%d time=%v lasttime=%v", pkt.Idx, pkt.Time, stream.lasttime)
 			return
 		}

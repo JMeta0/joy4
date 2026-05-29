@@ -159,7 +159,7 @@ func (q *Queue) DelayedTime(dur time.Duration) *QueueCursor {
 		if buf.IsValidPos(i) {
 			end := buf.Get(i)
 			for buf.IsValidPos(i) {
-				if end.Time-buf.Get(i).Time > dur {
+				if end.Time-buf.Get(i).Time > dur.Milliseconds() {
 					break
 				}
 				i--

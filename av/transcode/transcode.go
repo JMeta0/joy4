@@ -3,9 +3,10 @@ package transcode
 
 import (
 	"fmt"
+	"time"
+
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/pktque"
-	"time"
 )
 
 var Debug bool
@@ -82,7 +83,7 @@ func (self *tStream) audioDecodeAndEncode(inpkt av.Packet) (outpkts []av.Packet,
 	if Debug {
 		fmt.Println("transcode: push", inpkt.Time, dur)
 	}
-	self.timeline.Push(inpkt.Time, dur)
+	self.timeline.Push(inpkt.Time, dur.Milliseconds())
 
 	var _outpkts [][]byte
 	if _outpkts, err = self.aenc.Encode(frame); err != nil {
@@ -94,7 +95,7 @@ func (self *tStream) audioDecodeAndEncode(inpkt av.Packet) (outpkts []av.Packet,
 			return
 		}
 		outpkt := av.Packet{Idx: inpkt.Idx, Data: _outpkt}
-		outpkt.Time = self.timeline.Pop(dur)
+		outpkt.Time = self.timeline.Pop(dur.Milliseconds())
 
 		if Debug {
 			fmt.Println("transcode: pop", outpkt.Time, dur)
@@ -228,7 +229,6 @@ func (self *Demuxer) ReadPacket() (pkt av.Packet, err error) {
 			return
 		}
 	}
-	return
 }
 
 func (self *Demuxer) Streams() (streams []av.CodecData, err error) {

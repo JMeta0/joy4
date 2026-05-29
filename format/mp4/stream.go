@@ -3,7 +3,6 @@ package mp4
 import (
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/format/mp4/mp4io"
-	"time"
 )
 
 type Stream struct {
@@ -41,18 +40,18 @@ type Stream struct {
 	cttsEntry *mp4io.CompositionOffsetEntry
 }
 
-func timeToTs(tm time.Duration, timeScale int64) int64 {
-	return int64(tm * time.Duration(timeScale) / time.Second)
+func timeToTs(tm int64, timeScale int64) int64 {
+	return tm * timeScale
 }
 
-func tsToTime(ts int64, timeScale int64) time.Duration {
-	return time.Duration(ts) * time.Second / time.Duration(timeScale)
+func tsToTime(ts int64, timeScale int64) int64 {
+	return ts / timeScale
 }
 
-func (self *Stream) timeToTs(tm time.Duration) int64 {
-	return int64(tm * time.Duration(self.timeScale) / time.Second)
+func (self *Stream) timeToTs(tm int64) int64 {
+	return tm * self.timeScale
 }
 
-func (self *Stream) tsToTime(ts int64) time.Duration {
-	return time.Duration(ts) * time.Second / time.Duration(self.timeScale)
+func (self *Stream) tsToTime(ts int64) int64 {
+	return ts / self.timeScale
 }
