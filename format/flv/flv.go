@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/avutil"
@@ -79,6 +80,17 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 	return
 }
 
+// ProbeQuietWindow is the number of pushed tags without a newly discovered
+// track after which probing of an Enhanced RTMP multi-track audio stream is
+// considered complete. Encoders emit all codec config tags up front, so a
+// short quiet window reliably captures every track.
+const ProbeQuietWindow = 4
+
+type cachedTag struct {
+	tag flvio.Tag
+	ts  int64
+}
+
 type Prober struct {
 	HasAudio, HasVideo             bool
 	GotAudio, GotVideo             bool
@@ -86,7 +98,25 @@ type Prober struct {
 	PushedCount                    int
 	MaxProbePacketCount            int
 	Streams                        []av.CodecData
-	CachedPkts                     []av.Packet
+
+	// AudioStreamIdxs maps the audio ordinal (ordered by wire track ID) to the
+	// stream index within Streams. Valid after probing completed.
+	AudioStreamIdxs []int
+
+	// DroppedUnknownTrack counts media tags whose track ID was never
+	// registered (e.g. a track appearing after probing completed).
+	DroppedUnknownTrack int
+
+	videoTracks   map[uint8]av.CodecData
+	audioTracks   map[uint8]av.CodecData
+	videoOrder    []uint8
+	audioOrder    []uint8
+	videoTrackIdx map[uint8]int8
+	audioTrackIdx map[uint8]int8
+	frozen        bool
+
+	lastNewTrackPush int
+	cachedTags       []cachedTag
 }
 
 func NewProber(maxProbePacketCount int) *Prober {
@@ -97,9 +127,36 @@ func NewProber(maxProbePacketCount int) *Prober {
 	return prober
 }
 
+func (prober *Prober) registerVideoTrack(trackID uint8, stream av.CodecData) {
+	if prober.videoTracks == nil {
+		prober.videoTracks = make(map[uint8]av.CodecData)
+	}
+	if _, ok := prober.videoTracks[trackID]; ok {
+		return
+	}
+	prober.videoTracks[trackID] = stream
+	prober.videoOrder = append(prober.videoOrder, trackID)
+	prober.GotVideo = true
+	prober.lastNewTrackPush = prober.PushedCount
+}
+
+func (prober *Prober) registerAudioTrack(trackID uint8, stream av.CodecData) {
+	if prober.audioTracks == nil {
+		prober.audioTracks = make(map[uint8]av.CodecData)
+	}
+	if _, ok := prober.audioTracks[trackID]; ok {
+		return
+	}
+	prober.audioTracks[trackID] = stream
+	prober.audioOrder = append(prober.audioOrder, trackID)
+	prober.GotAudio = true
+	prober.lastNewTrackPush = prober.PushedCount
+}
+
 func (prober *Prober) CacheTag(_tag flvio.Tag, timestamp int64) {
-	pkt, _ := prober.TagToPacket(_tag, timestamp)
-	prober.CachedPkts = append(prober.CachedPkts, pkt)
+	// The tag is kept as-is and converted lazily in PopPacket(): the final
+	// stream index of a track is only known once probing completed.
+	prober.cachedTags = append(prober.cachedTags, cachedTag{tag: _tag, ts: timestamp})
 }
 
 func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
@@ -119,74 +176,64 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		if tag.IsExHeader {
 			if tag.FourCC == flvio.FOURCC_HEVC {
 				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
-					if !prober.GotVideo {
-						var stream hevcparser.CodecData
-						//fmt.Printf("got HEVC sequence start:\n%s\n", hex.Dump(tag.Data))
-						if stream, err = hevcparser.NewCodecDataFromHEVCDecoderConfRecord(tag.Data); err != nil {
-							err = fmt.Errorf("flv: hevc seqhdr invalid: %s", err.Error())
-							return
-						}
-						prober.VideoStreamIdx = len(prober.Streams)
-						prober.Streams = append(prober.Streams, stream)
-						prober.GotVideo = true
+					var stream hevcparser.CodecData
+					if stream, err = hevcparser.NewCodecDataFromHEVCDecoderConfRecord(tag.Data); err != nil {
+						err = fmt.Errorf("flv: hevc seqhdr invalid: %s", err.Error())
+						return
 					}
+					prober.registerVideoTrack(tag.TrackID, stream)
 				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 					prober.CacheTag(tag, timestamp)
 				}
 			} else if tag.FourCC == flvio.FOURCC_VP9 {
 				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
-					if !prober.GotVideo {
-						var stream vp9parser.CodecData
-						//fmt.Printf("got VP9 sequence start:\n%s\n", hex.Dump(tag.Data))
-						if stream, err = vp9parser.NewCodecDataFromVPDecoderConfRecord(tag.Data); err != nil {
-							err = fmt.Errorf("flv: vp9 seqhdr invalid: %s", err.Error())
-							return
-						}
-						prober.VideoStreamIdx = len(prober.Streams)
-						prober.Streams = append(prober.Streams, stream)
-						prober.GotVideo = true
+					var stream vp9parser.CodecData
+					if stream, err = vp9parser.NewCodecDataFromVPDecoderConfRecord(tag.Data); err != nil {
+						err = fmt.Errorf("flv: vp9 seqhdr invalid: %s", err.Error())
+						return
 					}
+					prober.registerVideoTrack(tag.TrackID, stream)
 				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 					prober.CacheTag(tag, timestamp)
 				}
 			} else if tag.FourCC == flvio.FOURCC_AV1 {
 				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START || tag.PacketType == flvio.PKTTYPE_MPEG2TS_SEQUENCE_START {
-					if !prober.GotVideo {
-						var stream av1parser.CodecData
+					var stream av1parser.CodecData
 
-						if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
-							//fmt.Printf("got AV1 sequence start:\n%s\n", hex.Dump(tag.Data))
-							if stream, err = av1parser.NewCodecDataFromAV1DecoderConfRecord(tag.Data); err != nil {
-								err = fmt.Errorf("flv: av1 seqhdr invalid: %s", err.Error())
-								return
-							}
-						} else {
-							//fmt.Printf("got AV1 video descriptor:\n%s\n", hex.Dump(tag.Data))
-							if stream, err = av1parser.NewCodecDataFromAV1VideoDescriptor(tag.Data); err != nil {
-								err = fmt.Errorf("flv: av1 video descriptor invalid: %s", err.Error())
-								return
-							}
+					if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+						if stream, err = av1parser.NewCodecDataFromAV1DecoderConfRecord(tag.Data); err != nil {
+							err = fmt.Errorf("flv: av1 seqhdr invalid: %s", err.Error())
+							return
 						}
-						prober.VideoStreamIdx = len(prober.Streams)
-						prober.Streams = append(prober.Streams, stream)
-						prober.GotVideo = true
+					} else {
+						if stream, err = av1parser.NewCodecDataFromAV1VideoDescriptor(tag.Data); err != nil {
+							err = fmt.Errorf("flv: av1 video descriptor invalid: %s", err.Error())
+							return
+						}
 					}
+					prober.registerVideoTrack(tag.TrackID, stream)
 				} else if tag.FourCC == flvio.FOURCC_VVC {
 					if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
-						if !prober.GotVideo {
-							var stream vvcparser.CodecData
-							//fmt.Printf("got HEVC sequence start:\n%s\n", hex.Dump(tag.Data))
-							if stream, err = vvcparser.NewCodecDataFromVVCDecoderConfRecord(tag.Data); err != nil {
-								err = fmt.Errorf("flv: vvc seqhdr invalid: %s", err.Error())
-								return
-							}
-							prober.VideoStreamIdx = len(prober.Streams)
-							prober.Streams = append(prober.Streams, stream)
-							prober.GotVideo = true
+						var stream vvcparser.CodecData
+						if stream, err = vvcparser.NewCodecDataFromVVCDecoderConfRecord(tag.Data); err != nil {
+							err = fmt.Errorf("flv: vvc seqhdr invalid: %s", err.Error())
+							return
 						}
+						prober.registerVideoTrack(tag.TrackID, stream)
 					} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 						prober.CacheTag(tag, timestamp)
 					}
+				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
+					prober.CacheTag(tag, timestamp)
+				}
+			} else if tag.FourCC == flvio.FOURCC_AVC1 {
+				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+					var stream h264parser.CodecData
+					if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
+						err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
+						return
+					}
+					prober.registerVideoTrack(tag.TrackID, stream)
 				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 					prober.CacheTag(tag, timestamp)
 				}
@@ -194,17 +241,12 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		} else {
 			switch tag.AVCPacketType {
 			case flvio.AVC_SEQHDR:
-				if !prober.GotVideo {
-					var stream h264parser.CodecData
-					//fmt.Printf("got H264 sequence start:\n%s\n", hex.Dump(tag.Data))
-					if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
-						err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
-						return
-					}
-					prober.VideoStreamIdx = len(prober.Streams)
-					prober.Streams = append(prober.Streams, stream)
-					prober.GotVideo = true
+				var stream h264parser.CodecData
+				if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
+					err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
+					return
 				}
+				prober.registerVideoTrack(tag.TrackID, stream)
 
 			case flvio.AVC_NALU:
 				prober.CacheTag(tag, timestamp)
@@ -212,20 +254,38 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		}
 
 	case flvio.TAG_AUDIO:
+		if tag.IsExHeader {
+			// Enhanced RTMP (E-RTMP v2) audio, possibly multi-track
+			switch tag.PacketType {
+			case flvio.PKTTYPE_SEQUENCE_START:
+				if tag.FourCC != flvio.FOURCC_MP4A {
+					err = fmt.Errorf("flv: unsupported ex audio fourcc '%s'", string(tag.FourCC[:]))
+					return
+				}
+				var stream aacparser.CodecData
+				if stream, err = aacparser.NewCodecDataFromMPEG4AudioConfigBytes(tag.Data); err != nil {
+					err = fmt.Errorf("flv: aac seqhdr invalid")
+					return
+				}
+				prober.registerAudioTrack(tag.TrackID, stream)
+
+			case flvio.PKTTYPE_CODED_FRAMES, flvio.PKTTYPE_CODED_FRAMESX:
+				prober.CacheTag(tag, timestamp)
+			}
+
+			return
+		}
+
 		switch tag.SoundFormat {
 		case flvio.SOUND_AAC:
 			switch tag.AACPacketType {
 			case flvio.AAC_SEQHDR:
-				if !prober.GotAudio {
-					var stream aacparser.CodecData
-					if stream, err = aacparser.NewCodecDataFromMPEG4AudioConfigBytes(tag.Data); err != nil {
-						err = fmt.Errorf("flv: aac seqhdr invalid")
-						return
-					}
-					prober.AudioStreamIdx = len(prober.Streams)
-					prober.Streams = append(prober.Streams, stream)
-					prober.GotAudio = true
+				var stream aacparser.CodecData
+				if stream, err = aacparser.NewCodecDataFromMPEG4AudioConfigBytes(tag.Data); err != nil {
+					err = fmt.Errorf("flv: aac seqhdr invalid")
+					return
 				}
+				prober.registerAudioTrack(tag.TrackID, stream)
 
 			case flvio.AAC_RAW:
 				prober.CacheTag(tag, timestamp)
@@ -234,11 +294,9 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		case flvio.SOUND_SPEEX:
 			if !prober.GotAudio {
 				stream := codec.NewSpeexCodecData(16000, tag.ChannelLayout())
-				prober.AudioStreamIdx = len(prober.Streams)
-				prober.Streams = append(prober.Streams, stream)
-				prober.GotAudio = true
-				prober.CacheTag(tag, timestamp)
+				prober.registerAudioTrack(tag.TrackID, stream)
 			}
+			prober.CacheTag(tag, timestamp)
 
 		case flvio.SOUND_NELLYMOSER:
 			if !prober.GotAudio {
@@ -248,40 +306,106 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 					SampleFormat_:  av.S16,
 					ChannelLayout_: tag.ChannelLayout(),
 				}
-				prober.AudioStreamIdx = len(prober.Streams)
-				prober.Streams = append(prober.Streams, stream)
-				prober.GotAudio = true
-				prober.CacheTag(tag, timestamp)
+				prober.registerAudioTrack(tag.TrackID, stream)
 			}
-
+			prober.CacheTag(tag, timestamp)
 		}
 	}
 
 	return
 }
 
+// freeze builds the final, canonical stream layout: video tracks first, then
+// audio tracks, each ordered by ascending wire track ID. This makes the
+// stream indexes (and thereby FFmpeg's 0:a:N ordinals on the loopback
+// round-trip) deterministic across reconnects. It is idempotent.
+func (prober *Prober) freeze() {
+	if prober.frozen {
+		return
+	}
+	prober.frozen = true
+
+	videoIDs := append([]uint8(nil), prober.videoOrder...)
+	audioIDs := append([]uint8(nil), prober.audioOrder...)
+	sort.Slice(videoIDs, func(i, j int) bool { return videoIDs[i] < videoIDs[j] })
+	sort.Slice(audioIDs, func(i, j int) bool { return audioIDs[i] < audioIDs[j] })
+
+	prober.Streams = nil
+	prober.videoTrackIdx = make(map[uint8]int8, len(videoIDs))
+	prober.audioTrackIdx = make(map[uint8]int8, len(audioIDs))
+	prober.AudioStreamIdxs = nil
+
+	for _, id := range videoIDs {
+		prober.videoTrackIdx[id] = int8(len(prober.Streams))
+		prober.Streams = append(prober.Streams, prober.videoTracks[id])
+	}
+
+	for _, id := range audioIDs {
+		prober.audioTrackIdx[id] = int8(len(prober.Streams))
+		prober.AudioStreamIdxs = append(prober.AudioStreamIdxs, len(prober.Streams))
+		prober.Streams = append(prober.Streams, prober.audioTracks[id])
+	}
+
+	if len(videoIDs) > 0 {
+		prober.VideoStreamIdx = int(prober.videoTrackIdx[videoIDs[0]])
+	}
+
+	if len(prober.AudioStreamIdxs) > 0 {
+		prober.AudioStreamIdx = prober.AudioStreamIdxs[0]
+	}
+}
+
+// Probed reports whether probing is complete. Once the declared streams are
+// present, a quiet window of pushes without newly discovered tracks must pass
+// before probing completes: additional audio tracks (e.g. an E-RTMP "VOD
+// track") announce themselves right after the first audio track, and track
+// registration must stay open for them. Legacy-only streams pay the same tiny
+// window, which is the only way to know no second track is coming.
 func (prober *Prober) Probed() (ok bool) {
 	if prober.MaxProbePacketCount <= 0 {
 		prober.MaxProbePacketCount = MaxProbePacketCount
 	}
 
+	if prober.frozen {
+		return true
+	}
+
 	if prober.HasAudio || prober.HasVideo {
 		if prober.HasAudio == prober.GotAudio && prober.HasVideo == prober.GotVideo {
-			return true
+			if prober.PushedCount-prober.lastNewTrackPush >= ProbeQuietWindow {
+				prober.freeze()
+				return true
+			}
+			return false
 		}
 	}
 
-	if prober.PushedCount == prober.MaxProbePacketCount {
+	if prober.PushedCount >= prober.MaxProbePacketCount {
+		// Hard stop: complete probing with whatever was discovered.
+		prober.freeze()
 		return true
 	}
 
 	return false
 }
 
+// Finish ends probing immediately with whatever tracks were discovered so
+// far. It is meant for streams that end (or break off) before the probe quiet
+// window could close.
+func (prober *Prober) Finish() {
+	prober.freeze()
+}
+
 func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet, ok bool) {
+	prober.freeze()
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
-		pkt.Idx = int8(prober.VideoStreamIdx)
+		idx, known := prober.videoTrackIdx[tag.TrackID]
+		if !known {
+			prober.DroppedUnknownTrack++
+			return
+		}
+		pkt.Idx = idx
 		switch tag.PacketType {
 		case flvio.PKTTYPE_CODED_FRAMES, flvio.PKTTYPE_CODED_FRAMESX:
 			ok = true
@@ -291,25 +415,32 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 		}
 
 	case flvio.TAG_AUDIO:
-		pkt.Idx = int8(prober.AudioStreamIdx)
-		switch tag.SoundFormat {
-		case flvio.SOUND_AAC:
-			switch tag.AACPacketType {
-			case flvio.AAC_RAW:
+		idx, known := prober.audioTrackIdx[tag.TrackID]
+		if !known {
+			prober.DroppedUnknownTrack++
+			return
+		}
+		pkt.Idx = idx
+		if tag.IsExHeader {
+			switch tag.PacketType {
+			case flvio.PKTTYPE_CODED_FRAMES, flvio.PKTTYPE_CODED_FRAMESX:
 				ok = true
 				pkt.Data = tag.Data
 				pkt.IsKeyFrame = true
 			}
+		} else {
+			switch tag.SoundFormat {
+			case flvio.SOUND_AAC:
+				if tag.AACPacketType == flvio.AAC_RAW {
+					ok = true
+					pkt.Data = tag.Data
+				}
 
-		case flvio.SOUND_SPEEX:
-			ok = true
-			pkt.Data = tag.Data
-			pkt.IsKeyFrame = true
-
-		case flvio.SOUND_NELLYMOSER:
-			ok = true
-			pkt.Data = tag.Data
-			pkt.IsKeyFrame = true
+			case flvio.SOUND_SPEEX, flvio.SOUND_NELLYMOSER:
+				ok = true
+				pkt.Data = tag.Data
+				pkt.IsKeyFrame = true
+			}
 		}
 	}
 
@@ -318,18 +449,54 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 }
 
 func (prober *Prober) Empty() bool {
-	return len(prober.CachedPkts) == 0
+	return len(prober.cachedTags) == 0
 }
 
-func (prober *Prober) PopPacket() av.Packet {
-	pkt := prober.CachedPkts[0]
-	prober.CachedPkts = prober.CachedPkts[1:]
-	return pkt
+func (prober *Prober) PopPacket() (pkt av.Packet, ok bool) {
+	for len(prober.cachedTags) > 0 {
+		cached := prober.cachedTags[0]
+		prober.cachedTags = prober.cachedTags[1:]
+		if pkt, ok = prober.TagToPacket(cached.tag, cached.ts); ok {
+			return
+		}
+	}
+	return
 }
 
-func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
+// TrackIDsForStreams assigns each stream its egress wire track ID: per media
+// type, numbered in stream order. The audio ordinal of a stream (its position
+// among the audio streams) thereby equals its E-RTMP track ID on the wire and
+// its FFmpeg 0:a:N ordinal on the loopback round-trip.
+func TrackIDsForStreams(streams []av.CodecData) []uint8 {
+	trackIDs := make([]uint8, len(streams))
+
+	var videoCount, audioCount uint8
+
+	for i, stream := range streams {
+		switch {
+		case stream.Type().IsVideo():
+			trackIDs[i] = videoCount
+			videoCount++
+		case stream.Type().IsAudio():
+			trackIDs[i] = audioCount
+			audioCount++
+		}
+	}
+
+	return trackIDs
+}
+
+// CodecDataToTag builds the codec config tag for a stream. Track 0 audio and
+// all video are written with legacy FLV framing for compatibility; audio
+// tracks >= 1 are written as Enhanced RTMP (E-RTMP v2) multitrack messages
+// (AAC/mp4a only).
+func CodecDataToTag(stream av.CodecData, track uint8) (_tag flvio.Tag, ok bool, err error) {
 	switch stream.Type() {
 	case av.H264:
+		if track != 0 {
+			err = fmt.Errorf("flv: multi-track video is not supported")
+			return
+		}
 		h264 := stream.(h264parser.CodecData)
 		tag := flvio.Tag{
 			Type:          flvio.TAG_VIDEO,
@@ -405,32 +572,52 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 		ok = true
 		_tag = tag
 
-	case av.NELLYMOSER:
-	case av.SPEEX:
-
 	case av.AAC:
 		aac := stream.(aacparser.CodecData)
-		tag := flvio.Tag{
-			Type:          flvio.TAG_AUDIO,
-			SoundFormat:   flvio.SOUND_AAC,
-			SoundRate:     flvio.SOUND_44Khz,
-			AACPacketType: flvio.AAC_SEQHDR,
-			Data:          aac.MPEG4AudioConfigBytes(),
+		if track == 0 {
+			tag := flvio.Tag{
+				Type:          flvio.TAG_AUDIO,
+				SoundFormat:   flvio.SOUND_AAC,
+				SoundRate:     flvio.SOUND_44Khz,
+				AACPacketType: flvio.AAC_SEQHDR,
+				Data:          aac.MPEG4AudioConfigBytes(),
+			}
+			switch aac.SampleFormat().BytesPerSample() {
+			case 1:
+				tag.SoundSize = flvio.SOUND_8BIT
+			default:
+				tag.SoundSize = flvio.SOUND_16BIT
+			}
+			switch aac.ChannelLayout().Count() {
+			case 1:
+				tag.SoundType = flvio.SOUND_MONO
+			case 2:
+				tag.SoundType = flvio.SOUND_STEREO
+			}
+			ok = true
+			_tag = tag
+		} else {
+			tag := flvio.Tag{
+				Type:           flvio.TAG_AUDIO,
+				SoundFormat:    flvio.SOUND_EXHEADER,
+				IsExHeader:     true,
+				IsMultitrack:   true,
+				MultitrackType: flvio.MULTITRACK_ONETRACK,
+				PacketType:     flvio.PKTTYPE_SEQUENCE_START,
+				FourCC:         flvio.FOURCC_MP4A,
+				TrackID:        track,
+				Data:           aac.MPEG4AudioConfigBytes(),
+			}
+			ok = true
+			_tag = tag
 		}
-		switch aac.SampleFormat().BytesPerSample() {
-		case 1:
-			tag.SoundSize = flvio.SOUND_8BIT
-		default:
-			tag.SoundSize = flvio.SOUND_16BIT
+
+	case av.NELLYMOSER:
+	case av.SPEEX:
+		if track != 0 {
+			err = fmt.Errorf("flv: multi-track audio requires AAC")
+			return
 		}
-		switch aac.ChannelLayout().Count() {
-		case 1:
-			tag.SoundType = flvio.SOUND_MONO
-		case 2:
-			tag.SoundType = flvio.SOUND_STEREO
-		}
-		ok = true
-		_tag = tag
 
 	default:
 		err = fmt.Errorf("flv: unspported codecType=%v", stream.Type())
@@ -439,9 +626,16 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 	return
 }
 
-func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp int64) {
+// PacketToTag builds the media tag for a packet. Audio track 0 keeps legacy
+// FLV framing; audio tracks >= 1 are written as Enhanced RTMP (E-RTMP v2)
+// multitrack messages (AAC/mp4a only). ok is false for streams that cannot be
+// represented (they must be skipped by the muxer).
+func PacketToTag(pkt av.Packet, stream av.CodecData, track uint8) (tag flvio.Tag, timestamp int64, ok bool) {
 	switch stream.Type() {
 	case av.H264:
+		if track != 0 {
+			return
+		}
 		tag = flvio.Tag{
 			Type:            flvio.TAG_VIDEO,
 			AVCPacketType:   flvio.AVC_NALU,
@@ -454,8 +648,12 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		} else {
 			tag.FrameType = flvio.FRAME_INTER
 		}
+		ok = true
 
 	case av.HEVC:
+		if track != 0 {
+			return
+		}
 		tag = flvio.Tag{
 			Type:            flvio.TAG_VIDEO,
 			IsExHeader:      true,
@@ -474,8 +672,12 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		} else {
 			tag.FrameType = flvio.FRAME_INTER
 		}
+		ok = true
 
 	case av.VP9:
+		if track != 0 {
+			return
+		}
 		tag = flvio.Tag{
 			Type:            flvio.TAG_VIDEO,
 			IsExHeader:      true,
@@ -490,8 +692,12 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		} else {
 			tag.FrameType = flvio.FRAME_INTER
 		}
+		ok = true
 
 	case av.AV1:
+		if track != 0 {
+			return
+		}
 		tag = flvio.Tag{
 			Type:            flvio.TAG_VIDEO,
 			IsExHeader:      true,
@@ -506,6 +712,7 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		} else {
 			tag.FrameType = flvio.FRAME_INTER
 		}
+		ok = true
 
 	case av.VVC:
 		tag = flvio.Tag{
@@ -524,40 +731,63 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		}
 
 	case av.AAC:
-		tag = flvio.Tag{
-			Type:          flvio.TAG_AUDIO,
-			SoundFormat:   flvio.SOUND_AAC,
-			SoundRate:     flvio.SOUND_44Khz,
-			AACPacketType: flvio.AAC_RAW,
-			Data:          pkt.Data,
+		if track == 0 {
+			tag = flvio.Tag{
+				Type:          flvio.TAG_AUDIO,
+				SoundFormat:   flvio.SOUND_AAC,
+				SoundRate:     flvio.SOUND_44Khz,
+				AACPacketType: flvio.AAC_RAW,
+				Data:          pkt.Data,
+			}
+			astream := stream.(av.AudioCodecData)
+			switch astream.SampleFormat().BytesPerSample() {
+			case 1:
+				tag.SoundSize = flvio.SOUND_8BIT
+			default:
+				tag.SoundSize = flvio.SOUND_16BIT
+			}
+			switch astream.ChannelLayout().Count() {
+			case 1:
+				tag.SoundType = flvio.SOUND_MONO
+			case 2:
+				tag.SoundType = flvio.SOUND_STEREO
+			}
+		} else {
+			tag = flvio.Tag{
+				Type:           flvio.TAG_AUDIO,
+				SoundFormat:    flvio.SOUND_EXHEADER,
+				IsExHeader:     true,
+				IsMultitrack:   true,
+				MultitrackType: flvio.MULTITRACK_ONETRACK,
+				PacketType:     flvio.PKTTYPE_CODED_FRAMES,
+				FourCC:         flvio.FOURCC_MP4A,
+				TrackID:        track,
+				Data:           pkt.Data,
+			}
 		}
-		astream := stream.(av.AudioCodecData)
-		switch astream.SampleFormat().BytesPerSample() {
-		case 1:
-			tag.SoundSize = flvio.SOUND_8BIT
-		default:
-			tag.SoundSize = flvio.SOUND_16BIT
-		}
-		switch astream.ChannelLayout().Count() {
-		case 1:
-			tag.SoundType = flvio.SOUND_MONO
-		case 2:
-			tag.SoundType = flvio.SOUND_STEREO
-		}
+		ok = true
 
 	case av.SPEEX:
+		if track != 0 {
+			return
+		}
 		tag = flvio.Tag{
 			Type:        flvio.TAG_AUDIO,
 			SoundFormat: flvio.SOUND_SPEEX,
 			Data:        pkt.Data,
 		}
+		ok = true
 
 	case av.NELLYMOSER:
+		if track != 0 {
+			return
+		}
 		tag = flvio.Tag{
 			Type:        flvio.TAG_AUDIO,
 			SoundFormat: flvio.SOUND_NELLYMOSER,
 			Data:        pkt.Data,
 		}
+		ok = true
 	}
 
 	timestamp = flvio.TimeToTs(pkt.Time)
@@ -565,9 +795,10 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 }
 
 type Muxer struct {
-	bufw    writeFlusher
-	b       []byte
-	streams []av.CodecData
+	bufw     writeFlusher
+	b        []byte
+	streams  []av.CodecData
+	trackIDs []uint8
 }
 
 type writeFlusher interface {
@@ -603,10 +834,12 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 		return
 	}
 
-	for _, stream := range streams {
+	trackIDs := TrackIDsForStreams(streams)
+
+	for i, stream := range streams {
 		var tag flvio.Tag
 		var ok bool
-		if tag, ok, err = CodecDataToTag(stream); err != nil {
+		if tag, ok, err = CodecDataToTag(stream, trackIDs[i]); err != nil {
 			return
 		}
 		if ok {
@@ -617,12 +850,16 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	}
 
 	muxer.streams = streams
+	muxer.trackIDs = trackIDs
 	return
 }
 
 func (muxer *Muxer) WritePacket(pkt av.Packet) (err error) {
 	stream := muxer.streams[pkt.Idx]
-	tag, timestamp := PacketToTag(pkt, stream)
+	tag, timestamp, ok := PacketToTag(pkt, stream, muxer.trackIDs[pkt.Idx])
+	if !ok {
+		return
+	}
 
 	if err = flvio.WriteTag(muxer.bufw, tag, timestamp, muxer.b); err != nil {
 		return
@@ -680,6 +917,13 @@ func (demuxer *Demuxer) prepare() (err error) {
 				var tag flvio.Tag
 				var timestamp int64
 				if tag, timestamp, err = flvio.ReadTag(demuxer.bufr, demuxer.b); err != nil {
+					if err == io.EOF && (demuxer.prober.GotAudio || demuxer.prober.GotVideo) {
+						// The stream ended before the probe quiet window could
+						// close: accept whatever was discovered.
+						demuxer.prober.Finish()
+						err = nil
+						break
+					}
 					return
 				}
 				if err = demuxer.prober.PushTag(tag, timestamp); err != nil {
@@ -705,9 +949,11 @@ func (demuxer *Demuxer) ReadPacket() (pkt av.Packet, err error) {
 		return
 	}
 
-	if !demuxer.prober.Empty() {
-		pkt = demuxer.prober.PopPacket()
-		return
+	for !demuxer.prober.Empty() {
+		var ok bool
+		if pkt, ok = demuxer.prober.PopPacket(); ok {
+			return
+		}
 	}
 
 	for {

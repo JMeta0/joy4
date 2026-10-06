@@ -34,6 +34,11 @@ const (
 	SOUND_AAC                   = 10
 	SOUND_SPEEX                 = 11
 
+	// SOUND_EXHEADER is the Enhanced RTMP (E-RTMP v2) SoundFormat value that
+	// marks an ExAudioTagHeader: the low nibble of the first byte carries the
+	// AudioPacketType instead of sound rate/size/type.
+	SOUND_EXHEADER = 9
+
 	SOUND_5_5Khz = 0
 	SOUND_11Khz  = 1
 	SOUND_22Khz  = 2
@@ -67,6 +72,17 @@ const (
 	PKTTYPE_CODED_FRAMESX          = 3
 	PKTTYPE_METADATA               = 4
 	PKTTYPE_MPEG2TS_SEQUENCE_START = 5
+
+	// PKTTYPE_MULTITRACK is the outer AudioPacketType of an E-RTMP v2
+	// multitrack audio message (never set on video tags, where 5 means
+	// PacketTypeMPEG2TSSequenceStart).
+	PKTTYPE_MULTITRACK = 5
+)
+
+const (
+	MULTITRACK_ONETRACK      = 0
+	MULTITRACK_MANYTRACKS    = 1
+	MULTITRACK_MANYSUBTRACKS = 2
 )
 
 var (
@@ -74,6 +90,8 @@ var (
 	FOURCC_VP9  = [4]byte{'v', 'p', '0', '9'}
 	FOURCC_HEVC = [4]byte{'h', 'v', 'c', '1'}
 	FOURCC_VVC  = [4]byte{'v', 'v', 'c', '1'}
+	FOURCC_AVC1 = [4]byte{'a', 'v', 'c', '1'}
+	FOURCC_MP4A = [4]byte{'m', 'p', '4', 'a'}
 )
 
 func FourCCToFloat(fourcc [4]byte) float64 {
@@ -196,6 +214,25 @@ type Tag struct {
 
 	FourCC [4]byte
 
+	/*
+		Enhanced RTMP (E-RTMP v2) audio track identity. For legacy audio tags
+		and non-wrapped ExHeader audio this is 0 (the default track). For
+		multitrack audio messages it is the wire AudioTrackId.
+	*/
+	TrackID uint8
+
+	/*
+		The audio message used the Multitrack wrapper
+		(outer AudioPacketType == PKTTYPE_MULTITRACK).
+	*/
+	IsMultitrack bool
+
+	/*
+		AvMultitrackType of the wrapper (0 = OneTrack). Only meaningful when
+		IsMultitrack is set.
+	*/
+	MultitrackType uint8
+
 	Data []byte
 }
 
@@ -221,19 +258,95 @@ func (t *Tag) audioParseHeader(b []byte) (n int, err error) {
 	t.SoundType = flags & 0x1
 
 	switch t.SoundFormat {
+	case SOUND_EXHEADER:
+		// Enhanced RTMP (E-RTMP v2) ExAudioTagHeader: the low nibble of the
+		// first byte is the AudioPacketType.
+		t.IsExHeader = true
+		t.PacketType = flags & 0x0f
+		// SoundRate/SoundSize/SoundType are not present on the wire
+		t.SoundRate = 0
+		t.SoundSize = 0
+		t.SoundType = 0
+
+		if t.PacketType == PKTTYPE_MULTITRACK {
+			if len(b) < n+1 {
+				err = fmt.Errorf("audiodata: parse invalid: multitrack header missing")
+				return
+			}
+			t.IsMultitrack = true
+			t.MultitrackType = b[n] >> 4
+			t.PacketType = b[n] & 0x0f
+			n++
+
+			if t.MultitrackType != MULTITRACK_ONETRACK {
+				err = fmt.Errorf("audiodata: parse invalid: unsupported multitrack type %d", t.MultitrackType)
+				return
+			}
+		}
+
+		if len(b) < n+4 {
+			err = fmt.Errorf("audiodata: parse invalid: fourCC missing")
+			return
+		}
+		t.FourCC[0] = b[n]
+		t.FourCC[1] = b[n+1]
+		t.FourCC[2] = b[n+2]
+		t.FourCC[3] = b[n+3]
+		n += 4
+
+		if t.IsMultitrack {
+			if len(b) < n+1 {
+				err = fmt.Errorf("audiodata: parse invalid: trackId missing")
+				return
+			}
+			t.TrackID = b[n]
+			n++
+		}
+
 	case SOUND_AAC:
 		if len(b) < n+1 {
 			err = fmt.Errorf("audiodata: parse invalid")
 			return
 		}
 		t.AACPacketType = b[n]
+		t.PacketType = t.AACPacketType
 		n++
+
+	default:
+		t.PacketType = PKTTYPE_CODED_FRAMES
 	}
 
 	return
 }
 
 func (t Tag) audioFillHeader(b []byte) (n int) {
+	if t.IsExHeader {
+		outertype := t.PacketType
+		if t.IsMultitrack {
+			outertype = PKTTYPE_MULTITRACK
+		}
+		b[n] = SOUND_EXHEADER<<4 | outertype
+		n++
+
+		if t.IsMultitrack {
+			b[n] = t.MultitrackType<<4 | t.PacketType
+			n++
+		}
+
+		b[n] = t.FourCC[0]
+		b[n+1] = t.FourCC[1]
+		b[n+2] = t.FourCC[2]
+		b[n+3] = t.FourCC[3]
+		n += 4
+
+		if t.IsMultitrack {
+			b[n] = t.TrackID
+			n++
+		}
+
+		return
+	}
+
 	var flags uint8
 	flags |= t.SoundFormat << 4
 	flags |= t.SoundRate << 2
@@ -308,8 +421,12 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 
 		t.CompositionTime = 0
 
-		if t.FourCC == FOURCC_HEVC {
+		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_AVC1 {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
+				if len(b) < n+3 {
+					err = fmt.Errorf("videodata: parse invalid: composition time missing")
+					return
+				}
 				t.CompositionTime = int64(pio.I24BE(b[n:]))
 				n += 3
 			}
@@ -332,7 +449,7 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 		b[n+3] = t.FourCC[3]
 		n += 4
 
-		if t.FourCC == FOURCC_HEVC {
+		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_AVC1 {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
 				pio.PutI24BE(b[n:], int32(t.CompositionTime&0x7FFFFF))
 				n += 3

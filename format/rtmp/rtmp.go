@@ -243,6 +243,9 @@ type Conn struct {
 
 	prober  *flv.Prober
 	streams []av.CodecData
+	// trackIDs is parallel to streams: the E-RTMP wire track ID of each
+	// stream on the write path (set in WriteHeader).
+	trackIDs []uint8
 
 	bufr *bufio.Reader
 	bufw *bufio.Writer
@@ -816,19 +819,30 @@ func (conn *Conn) checkCreateStreamResult() (ok bool, avmsgsid uint32) {
 }
 
 func (conn *Conn) probe() (err error) {
+	var lastTagErr error
+
 	for !conn.prober.Probed() {
 		var tag flvio.Tag
 		if tag, err = conn.pollAVTag(); err != nil {
 			return
 		}
-		if err = conn.prober.PushTag(tag, conn.timestamp); err != nil {
+		if perr := conn.prober.PushTag(tag, conn.timestamp); perr != nil {
+			lastTagErr = perr
 			if Debug {
-				fmt.Printf("rtmp: error probing tag: %s\n", err.Error())
+				fmt.Printf("rtmp: error probing tag: %s\n", perr.Error())
 			}
 		}
 	}
 
 	conn.streams = conn.prober.Streams
+
+	if len(conn.streams) == 0 {
+		if lastTagErr != nil {
+			return fmt.Errorf("no decodable streams in stream: %w", lastTagErr)
+		}
+		return fmt.Errorf("no decodable streams in stream (%d tags probed)", conn.prober.PushedCount)
+	}
+
 	conn.stage++
 	return
 }
@@ -852,7 +866,7 @@ func (conn *Conn) writeConnect(path string) (err error) {
 			"audioCodecs":   4071,
 			"videoCodecs":   252,
 			"videoFunction": 1,
-			"fourCcList":    flvio.AMFArray{"av01", "vp09", "hvc1"},
+			"fourCcList":    flvio.AMFArray{"av01", "vp09", "hvc1", "avc1"},
 		},
 	); err != nil {
 		return
@@ -1016,9 +1030,11 @@ func (conn *Conn) ReadPacket() (pkt av.Packet, err error) {
 		return
 	}
 
-	if !conn.prober.Empty() {
-		pkt = conn.prober.PopPacket()
-		return
+	for !conn.prober.Empty() {
+		var ok bool
+		if pkt, ok = conn.prober.PopPacket(); ok {
+			return
+		}
 	}
 
 	for {
@@ -1097,7 +1113,10 @@ func (conn *Conn) WritePacket(pkt av.Packet) (err error) {
 	}
 
 	stream := conn.streams[pkt.Idx]
-	tag, timestamp := flv.PacketToTag(pkt, stream)
+	tag, timestamp, ok := flv.PacketToTag(pkt, stream, conn.trackIDs[pkt.Idx])
+	if !ok {
+		return
+	}
 
 	if Debug {
 		fmt.Println("rtmp: WritePacket", pkt.Idx, pkt.Time, pkt.CompositionTime)
@@ -1153,10 +1172,12 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	// > Videodata(decoder config)
 	// > Audiodata(decoder config)
-	for _, stream := range streams {
+	trackIDs := flv.TrackIDsForStreams(streams)
+
+	for i, stream := range streams {
 		var ok bool
 		var tag flvio.Tag
-		if tag, ok, err = flv.CodecDataToTag(stream); err != nil {
+		if tag, ok, err = flv.CodecDataToTag(stream, trackIDs[i]); err != nil {
 			return
 		}
 		if ok {
@@ -1167,6 +1188,7 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 	}
 
 	conn.streams = streams
+	conn.trackIDs = trackIDs
 	conn.stage++
 	return
 }
